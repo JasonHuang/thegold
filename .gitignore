@@ -28,5 +28,5 @@ models/
 *.h5
 
 # 结果图片
-gold_price_prediction_results.png
+*.png
 
