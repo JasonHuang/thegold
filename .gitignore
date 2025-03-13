@@ -21,4 +21,12 @@ __pycache__/
 # 其他临时文件
 *.swp
 *~
-.DS_Store 
+.DS_Store
+
+# 模型文件目录
+models/
+*.h5
+
+# 结果图片
+gold_price_prediction_results.png
+
