@@ -294,7 +294,7 @@ def main(window=60, future_days=5, epochs=100, batch_size=32):
         # 绘制原始数据图表，检查异常值和趋势
         plt.figure(figsize=(12,6))
         plt.plot(df.index, df['price'])
-        plt.title('黄金价格走势')
+        plt.title('Gold Price Trend')
         plt.grid(True)
         plt.savefig('gold_price_trend.png')
         plt.close()
