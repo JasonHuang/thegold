@@ -17,7 +17,10 @@ import datetime
 import matplotlib.font_manager as fm
 import tensorflow as tf
 from sklearn.model_selection import KFold, TimeSeriesSplit
-from typing import Optional
+from typing import Optional, Dict, Any, Tuple
+import json
+import time
+from pathlib import Path
 
 # 配置日志
 logging.basicConfig(
@@ -265,8 +268,111 @@ def plot_results(actual, pred, history=None, predictions_days=5, use_english=Fal
     plt.savefig(f'gold_price_prediction_results_{language}.png', dpi=300, bbox_inches='tight')
     plt.show()
 
+# 保存模型元数据函数
+def save_model_metadata(model_path: str, metrics: Dict[str, Any], data_info: Dict[str, Any]) -> str:
+    """保存模型元数据，包括训练日期和性能指标
+    
+    Args:
+        model_path: 模型文件路径
+        metrics: 模型评估指标
+        data_info: 训练数据信息
+        
+    Returns:
+        元数据文件路径
+    """
+    metadata = {
+        "model_path": model_path,
+        "training_date": datetime.datetime.now().strftime("%Y-%m-%d"),
+        "metrics": metrics,
+        "data_info": data_info,
+        "next_training_date": (datetime.datetime.now() + datetime.timedelta(days=90)).strftime("%Y-%m-%d")
+    }
+    
+    # 创建元数据文件路径
+    metadata_path = model_path.replace('.keras', '_metadata.json')
+    with open(metadata_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=4)
+    
+    # 同时更新"最新模型"的元数据链接
+    latest_metadata_path = os.path.join(os.path.dirname(model_path), 'latest_model_metadata.json')
+    with open(latest_metadata_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=4)
+    
+    logger.info(f"模型元数据已保存到: {metadata_path}")
+    return metadata_path
+
+# 检查是否需要重新训练模型
+def should_retrain_model(retraining_period_days: int = 90) -> Tuple[bool, str]:
+    """检查是否需要根据时间间隔重新训练模型
+    
+    Args:
+        retraining_period_days: 重新训练周期（天）
+        
+    Returns:
+        (是否需要重新训练, 原因说明)
+    """
+    model_dir = Path('models')
+    latest_metadata_path = model_dir / 'latest_model_metadata.json'
+    
+    # 如果没有元数据文件，则需要训练新模型
+    if not latest_metadata_path.exists():
+        return True, "没有找到现有模型元数据，需要训练新模型"
+    
+    try:
+        # 读取元数据
+        with open(latest_metadata_path, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+        
+        # 获取最后训练日期和计划下次训练日期
+        last_training_date = datetime.datetime.strptime(metadata['training_date'], "%Y-%m-%d")
+        next_training_date = metadata.get('next_training_date')
+        
+        if next_training_date:
+            next_training_date = datetime.datetime.strptime(next_training_date, "%Y-%m-%d")
+        else:
+            # 如果没有下次训练日期，则基于最后训练日期和重新训练周期计算
+            next_training_date = last_training_date + datetime.timedelta(days=retraining_period_days)
+        
+        # 检查是否到达重新训练时间
+        current_date = datetime.datetime.now()
+        if current_date >= next_training_date:
+            days_since_last_training = (current_date - last_training_date).days
+            return True, f"距离上次训练已经过去 {days_since_last_training} 天，超过了设定的 {retraining_period_days} 天重新训练周期"
+        else:
+            days_until_next_training = (next_training_date - current_date).days
+            return False, f"距离下次计划训练还有 {days_until_next_training} 天，当前模型依然有效"
+    
+    except Exception as e:
+        logger.warning(f"检查模型训练状态时出错: {str(e)}")
+        return True, f"检查模型状态时发生错误，建议重新训练: {str(e)}"
+
+# 获取最新模型路径
+def get_latest_model_path() -> Optional[str]:
+    """获取最新训练的模型路径
+    
+    Returns:
+        最新模型路径，如果没有则返回None
+    """
+    model_dir = Path('models')
+    latest_metadata_path = model_dir / 'latest_model_metadata.json'
+    
+    if not latest_metadata_path.exists():
+        return None
+    
+    try:
+        with open(latest_metadata_path, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+        
+        model_path = metadata['model_path']
+        if os.path.exists(model_path):
+            return model_path
+    except Exception as e:
+        logger.warning(f"获取最新模型路径时出错: {str(e)}")
+    
+    return None
+
 # 主程序
-def main(window=60, future_days=5, epochs=100, batch_size=32):
+def main(window=60, future_days=5, epochs=100, batch_size=32, force_retrain=False, retraining_period_days=90):
     """主函数
     
     Args:
@@ -274,95 +380,155 @@ def main(window=60, future_days=5, epochs=100, batch_size=32):
         future_days: 预测未来的天数
         epochs: 训练轮数
         batch_size: 批量大小
+        force_retrain: 是否强制重新训练模型
+        retraining_period_days: 模型重新训练周期（天）
     """
     try:
         # 创建模型保存目录
         model_dir = 'models'
         os.makedirs(model_dir, exist_ok=True)
         
-        # 获取当前时间，用于模型文件命名
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_path = os.path.join(model_dir, f'gold_prediction_model_{timestamp}.h5')
+        # 检查是否需要重新训练模型
+        should_train, reason = should_retrain_model(retraining_period_days)
         
-        # 获取数据
-        df = fetch_gold_data()
-        print(f"最新数据日期：{df.index[-1].strftime('%Y-%m-%d')}")
+        # 如果强制重新训练或者应该重新训练
+        if force_retrain or should_train:
+            logger.info(f"将重新训练模型: {reason}")
+            
+            # 获取当前时间，用于模型文件命名
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            model_path = os.path.join(model_dir, f'gold_prediction_model_{timestamp}.keras')
+            
+            # 获取数据
+            df = fetch_gold_data()
+            print(f"最新数据日期：{df.index[-1].strftime('%Y-%m-%d')}")
+            
+            # 数据质量检查
+            print(f"数据统计: \n{df.describe()}")
+            
+            # 绘制原始数据图表，检查异常值和趋势
+            plt.figure(figsize=(12,6))
+            plt.plot(df.index, df['price'])
+            plt.title('黄金价格走势')
+            plt.grid(True)
+            plt.savefig('gold_price_trend.png')
+            plt.close()
+            
+            # 特征相关性分析
+            df_features = engineer_features(df)
+            corr = df_features.corr()
+            plt.figure(figsize=(14,10))
+            sns.heatmap(corr, annot=True, cmap='coolwarm', vmin=-1, vmax=1)
+            plt.savefig('feature_correlation.png')
+            plt.close()
+            
+            # 数据预处理
+            X_train, y_train, X_test, y_test, scaler = preprocess_data(
+                df_features, 
+                window=window, 
+                future=future_days,
+                test_size=0.2
+            )
+            
+            # 学习率余弦退火
+            lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=0.001,
+                decay_steps=epochs * (len(X_train) // batch_size),
+                alpha=0.0001
+            )
+            optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+            
+            # 构建模型
+            model = build_model((X_train.shape[1], X_train.shape[2]), future_days)
+            
+            # 创建回调函数
+            callbacks = [
+                EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
+                ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=0.0001)
+            ]
+            
+            # 模型训练
+            logger.info("开始训练模型...")
+            history = model.fit(
+                X_train, y_train,
+                epochs=50,  # 减少初始epochs
+                batch_size=16,  # 减少批量大小
+                validation_split=0.2,
+                callbacks=callbacks,
+                verbose=1
+            )
+            
+            # 评估模型
+            logger.info("评估模型性能...")
+            actual, pred, metrics = evaluate_model(model, X_test, y_test, scaler)
+            
+            # 打印评估指标
+            print(f"模型评估指标:")
+            print(f"MAE: {metrics['mae']:.2f} 元/克")
+            print(f"RMSE: {metrics['rmse']:.2f} 元/克")
+            print(f"R²: {metrics['r2']:.2%}")
+            
+            # 可视化结果 - 技术性图表
+            logger.info("生成技术指标可视化图表...")
+            plot_results(actual, pred, history, future_days, use_english=True)
+            
+            # 添加普通用户友好的趋势图表
+            logger.info("生成面向普通用户的未来趋势图...")
+            plot_future_trend(future_days=future_days, use_english=True)
+            
+            # 保存模型使用新格式
+            model.save(model_path)
+            logger.info(f"模型已保存到: {model_path}")
+            
+            # 同时保存一个latest模型副本，方便后续加载
+            latest_model_path = os.path.join(model_dir, 'gold_prediction_model_latest.keras')
+            model.save(latest_model_path)
+            
+            # 保存模型元数据
+            data_info = {
+                "data_range": {
+                    "start": df.index.min().strftime('%Y-%m-%d'),
+                    "end": df.index.max().strftime('%Y-%m-%d')
+                },
+                "data_count": len(df),
+                "feature_count": df_features.shape[1]
+            }
+            save_model_metadata(model_path, metrics, data_info)
+            
+            return model, scaler, metrics
         
-        # 数据质量检查
-        print(f"数据统计: \n{df.describe()}")
-        
-        # 绘制原始数据图表，检查异常值和趋势
-        plt.figure(figsize=(12,6))
-        plt.plot(df.index, df['price'])
-        plt.title('Gold Price Trend')
-        plt.grid(True)
-        plt.savefig('gold_price_trend.png')
-        plt.close()
-        
-        # 特征相关性分析
-        df_features = engineer_features(df)
-        corr = df_features.corr()
-        plt.figure(figsize=(14,10))
-        sns.heatmap(corr, annot=True, cmap='coolwarm', vmin=-1, vmax=1)
-        plt.savefig('feature_correlation.png')
-        plt.close()
-        
-        # 数据预处理
-        X_train, y_train, X_test, y_test, scaler = preprocess_data(
-            df_features, 
-            window=window, 
-            future=future_days,
-            test_size=0.2
-        )
-        
-        # 学习率余弦退火
-        lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
-            initial_learning_rate=0.001,
-            decay_steps=epochs * (len(X_train) // batch_size),
-            alpha=0.0001
-        )
-        optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-        
-        # 构建模型
-        model = build_model((X_train.shape[1], X_train.shape[2]), future_days)
-        
-        # 创建回调函数
-        callbacks = [
-            EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True),
-            ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=3, min_lr=0.0001)
-        ]
-        
-        # 模型训练
-        logger.info("开始训练模型...")
-        history = model.fit(
-            X_train, y_train,
-            epochs=50,  # 减少初始epochs
-            batch_size=16,  # 减少批量大小
-            validation_split=0.2,
-            callbacks=callbacks,
-            verbose=1
-        )
-        
-        # 评估模型
-        logger.info("评估模型性能...")
-        actual, pred, metrics = evaluate_model(model, X_test, y_test, scaler)
-        
-        # 打印评估指标
-        print(f"模型评估指标:")
-        print(f"MAE: {metrics['mae']:.2f} 元/克")
-        print(f"RMSE: {metrics['rmse']:.2f} 元/克")
-        print(f"R²: {metrics['r2']:.2%}")
-        
-        # 可视化结果
-        logger.info("生成可视化图表...")
-        plot_results(actual, pred, history, future_days, use_english=True)
-        
-        # 保存模型使用新格式
-        model.save(f'models/gold_prediction_model_{timestamp}.keras')
-        
-        logger.info(f"模型已保存到: {model_path}")
-        
-        return model, scaler, metrics
+        else:
+            # 加载现有模型进行预测
+            logger.info(f"使用现有模型: {reason}")
+            model_path = get_latest_model_path()
+            
+            if not model_path:
+                logger.warning("无法找到现有模型，将重新训练")
+                return main(window, future_days, epochs, batch_size, force_retrain=True)
+            
+            # 加载模型和元数据
+            model = load_model(model_path)
+            
+            with open(Path('models') / 'latest_model_metadata.json', 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+            
+            # 获取最新的一些数据用于测试和预测
+            df = fetch_gold_data()
+            df_features = engineer_features(df)
+            
+            logger.info(f"加载现有模型成功，上次训练日期: {metadata['training_date']}")
+            print(f"现有模型评估指标:")
+            print(f"MAE: {metadata['metrics']['mae']:.2f} 元/克")
+            print(f"RMSE: {metadata['metrics']['rmse']:.2f} 元/克")
+            print(f"R²: {metadata['metrics']['r2']:.2%}")
+            
+            # 生成面向普通用户的未来趋势图
+            logger.info("生成面向普通用户的未来趋势图...")
+            plot_future_trend(future_days=future_days, use_english=True)
+            
+            # 如果需要，可以添加对模型进行简单评估的代码
+            
+            return model, None, metadata['metrics']
         
     except Exception as e:
         logger.error(f"程序执行失败: {str(e)}")
@@ -465,16 +631,21 @@ def analyze_feature_importance(model, X, feature_names):
 
 def generate_predictions(days=30):
     """生成未来30天的预测"""
-    model = load_model('models/gold_prediction_model_latest.h5')
+    model = load_model('models/gold_prediction_model_latest.keras')  # 更新文件扩展名为.keras
     
     # 获取最新数据
     df = fetch_gold_data()
     df_features = engineer_features(df)
     
     # 准备预测输入 - 最新的窗口
+    window = 60  # 添加默认窗口大小
     latest_data = df_features.iloc[-window:].values
     scaler = MinMaxScaler()
-    latest_scaled = scaler.fit_transform(latest_data)
+    scaler.fit(df_features[['price']].values)  # 只对价格列进行拟合
+    
+    # 对所有特征进行归一化
+    features_scaler = MinMaxScaler()
+    latest_scaled = features_scaler.fit_transform(latest_data)
     X_pred = latest_scaled.reshape(1, window, df_features.shape[1])
     
     # 递归预测
@@ -483,7 +654,7 @@ def generate_predictions(days=30):
     
     for _ in range(days):
         # 预测下一个值
-        next_pred = model.predict(current_sequence)[0]
+        next_pred = model.predict(current_sequence, verbose=0)[0]
         predictions.append(next_pred[0])
         
         # 更新序列
@@ -498,7 +669,168 @@ def generate_predictions(days=30):
     predictions = scaler.inverse_transform(
         np.array(predictions).reshape(-1, 1))
     
-    return predictions
+    # 创建日期索引 - 从最新数据的下一天开始
+    last_date = df.index[-1]
+    future_dates = [last_date + datetime.timedelta(days=i+1) for i in range(days)]
+    
+    return predictions, future_dates
+
+# 针对普通用户的直观可视化函数
+def plot_future_trend(future_days=5, use_english=False, use_sample_data=False):
+    """创建更直观的未来金价走势图
+    
+    Args:
+        future_days: 预测的未来天数
+        use_english: 是否使用英文
+        use_sample_data: 当没有训练好的模型时，是否使用样例数据
+    """
+    try:
+        # 获取预测数据
+        predictions, future_dates = generate_predictions(future_days)
+        predictions = predictions.flatten()
+    except Exception as e:
+        logger.warning(f"获取预测数据失败: {str(e)}，将使用样例数据")
+        if not use_sample_data:
+            raise
+            
+        # 使用样例数据创建示例图表
+        df = fetch_gold_data()
+        last_date = df.index[-1]
+        future_dates = [last_date + datetime.timedelta(days=i+1) for i in range(future_days)]
+        
+        # 生成一些模拟的预测结果 - 以最后一个价格为基准，添加一些随机波动
+        last_price = df['price'].iloc[-1]
+        # 使用随机种子确保每次生成相同结果
+        np.random.seed(42)
+        # 生成一个趋势增长或下降的序列，再加上随机波动
+        trend = np.linspace(0, 0.05, future_days)  # 生成0到5%的线性增长
+        noise = np.random.normal(0, 0.01, future_days)  # 添加1%左右的随机波动
+        predictions = last_price * (1 + trend + noise)
+        
+        logger.warning("使用样例数据创建的示例图表，仅供参考")
+    
+    # 获取历史数据作为参考
+    df = fetch_gold_data()
+    recent_days = 30  # 显示最近30天的历史数据
+    historical = df['price'].iloc[-recent_days:].copy()
+    
+    # 设置字体和样式
+    plt.style.use('seaborn-v0_8')
+    plt.figure(figsize=(14, 8))
+    
+    # 设置语言
+    if use_english:
+        title = "Gold Price Forecast (Next 5 Days)"
+        subtitle = f"Last updated: {datetime.datetime.now().strftime('%Y-%m-%d')}"
+        ylabel = "Price (CNY/gram)"
+        trend_label = "Price Trend"
+        history_label = "Historical Price"
+        prediction_label = "Predicted Price"
+        today_label = "Today"
+        note_text = "Note: This forecast is based on historical data patterns and may vary due to market conditions."
+        if predictions[-1] > predictions[0]:
+            trend_text = f"🔼 Upward Trend: Price expected to increase by {predictions[-1]-predictions[0]:.2f} CNY/gram ({(predictions[-1]/predictions[0]-1)*100:.1f}%)"
+            trend_color = 'green'
+        elif predictions[-1] < predictions[0]:
+            trend_text = f"🔽 Downward Trend: Price expected to decrease by {predictions[0]-predictions[-1]:.2f} CNY/gram ({(1-predictions[-1]/predictions[0])*100:.1f}%)"
+            trend_color = 'red'
+        else:
+            trend_text = "◀️▶️ Stable Price: No significant change expected"
+            trend_color = 'blue'
+        
+        # 添加样例数据警告
+        if use_sample_data:
+            sample_warning = "⚠️ SAMPLE DATA - FOR DEMONSTRATION ONLY ⚠️"
+    else:
+        title = "黄金价格预测（未来5天）"
+        subtitle = f"最后更新：{datetime.datetime.now().strftime('%Y-%m-%d')}"
+        ylabel = "价格（元/克）"
+        trend_label = "价格趋势"
+        history_label = "历史价格"
+        prediction_label = "预测价格"
+        today_label = "今天"
+        note_text = "注意：该预测基于历史数据模式，可能因市场条件而变化。"
+        if predictions[-1] > predictions[0]:
+            trend_text = f"🔼 上涨趋势：预计价格将上涨 {predictions[-1]-predictions[0]:.2f} 元/克 ({(predictions[-1]/predictions[0]-1)*100:.1f}%)"
+            trend_color = 'red'  # 在中国文化中，红色通常代表上涨
+        elif predictions[-1] < predictions[0]:
+            trend_text = f"🔽 下跌趋势：预计价格将下跌 {predictions[0]-predictions[-1]:.2f} 元/克 ({(1-predictions[-1]/predictions[0])*100:.1f}%)"
+            trend_color = 'green'  # 在中国文化中，绿色通常代表下跌
+        else:
+            trend_text = "◀️▶️ 价格稳定：预计无明显变化"
+            trend_color = 'blue'
+            
+        # 添加样例数据警告
+        if use_sample_data:
+            sample_warning = "⚠️ 示例数据 - 仅用于演示 ⚠️"
+    
+    # 绘制历史数据
+    plt.plot(historical.index, historical.values, 
+             color='gray', alpha=0.7, linewidth=2, label=history_label)
+    
+    # 在图表上标记"今天"
+    plt.axvline(x=df.index[-1], color='black', linestyle='--', alpha=0.7)
+    plt.text(df.index[-1], historical.min() * 0.98, today_label, 
+             ha='center', va='top', rotation=90, fontsize=10)
+    
+    # 绘制预测数据
+    prediction_line = plt.plot(future_dates, predictions, 
+                              color=trend_color, marker='o', markersize=8, 
+                              linewidth=3, label=prediction_label)[0]
+    
+    # 填充预测区域，增强视觉效果
+    plt.fill_between(future_dates, predictions, 
+                     df['price'].iloc[-1], alpha=0.2, color=trend_color)
+    
+    # 为每个预测点添加价格标签
+    for i, (date, price) in enumerate(zip(future_dates, predictions)):
+        plt.annotate(f'{price:.1f}', (date, price), 
+                     textcoords="offset points", 
+                     xytext=(0,10), ha='center',
+                     fontweight='bold', fontsize=12)
+    
+    # 添加趋势指示文本框
+    plt.figtext(0.5, 0.01, trend_text, 
+               ha='center', fontsize=14, fontweight='bold',
+               bbox=dict(facecolor='white', alpha=0.8, boxstyle='round,pad=0.5'))
+    
+    # 添加样例数据警告
+    if use_sample_data:
+        plt.figtext(0.5, 0.95, sample_warning, 
+                   ha='center', fontsize=16, fontweight='bold', color='red',
+                   bbox=dict(facecolor='yellow', alpha=0.8, boxstyle='round,pad=0.5'))
+    
+    # 添加注释说明
+    plt.figtext(0.5, -0.02, note_text, ha='center', fontsize=10, style='italic')
+    
+    # 设置图表标题和标签
+    plt.title(title, fontsize=18, fontweight='bold')
+    plt.suptitle(subtitle, fontsize=10, y=0.92)
+    plt.ylabel(ylabel, fontsize=12)
+    plt.grid(True, alpha=0.3)
+    
+    # 格式化x轴日期
+    plt.gca().xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%m-%d'))
+    plt.xticks(rotation=45)
+    
+    # 调整y轴范围，确保有足够的空间显示注释
+    y_min = min(historical.min(), predictions.min()) * 0.98
+    y_max = max(historical.max(), predictions.max()) * 1.02
+    plt.ylim(y_min, y_max)
+    
+    # 添加图例
+    plt.legend(loc='upper left')
+    
+    # 确保布局正确
+    plt.tight_layout(rect=[0, 0.04, 1, 0.96])
+    
+    # 保存图表
+    language = "en" if use_english else "cn"
+    plt.savefig(f'gold_future_trend_{language}.png', dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    # 返回预测结果和日期，以便可能的进一步使用
+    return predictions, future_dates
 
 # 数据加载时进行内存优化
 def optimize_dataframe(df):
@@ -508,4 +840,29 @@ def optimize_dataframe(df):
     return df
 
 if __name__ == "__main__":
-    main(window=60, future_days=5, epochs=100, batch_size=32)
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='黄金价格预测系统')
+    parser.add_argument('--force-retrain', action='store_true', help='强制重新训练模型')
+    parser.add_argument('--retrain-period', type=int, default=90, help='模型重新训练周期（天），默认90天')
+    parser.add_argument('--window', type=int, default=60, help='历史窗口大小')
+    parser.add_argument('--future', type=int, default=5, help='预测未来天数')
+    parser.add_argument('--user-friendly', action='store_true', help='只生成面向普通用户的趋势图')
+    parser.add_argument('--chinese', action='store_true', help='使用中文生成图表')
+    parser.add_argument('--sample', action='store_true', help='使用样例数据生成趋势图（当没有训练好的模型时）')
+    
+    args = parser.parse_args()
+    
+    # 如果只需要生成用户友好的趋势图，则不进行完整的训练过程
+    if args.user_friendly:
+        use_english = not args.chinese
+        plot_future_trend(future_days=args.future, use_english=use_english, use_sample_data=args.sample)
+    else:
+        main(
+            window=args.window,
+            future_days=args.future,
+            epochs=100,
+            batch_size=32,
+            force_retrain=args.force_retrain,
+            retraining_period_days=args.retrain_period
+        )
