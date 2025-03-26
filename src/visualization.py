@@ -108,7 +108,7 @@ def plot_results(actual, pred, history=None, predictions_days=5, use_english=Fal
     plt.savefig(f'gold_price_prediction_results_{language}.png', dpi=300, bbox_inches='tight')
     plt.close()
 
-def plot_future_trend(predictions, future_dates, df, future_days=5, use_english=False, use_sample_data=False):
+def plot_predictions(predictions, future_dates, df, future_days=5, use_english=False, use_sample_data=False):
     """创建更直观的未来金价走势图
     
     Args:

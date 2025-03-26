@@ -14,7 +14,7 @@ import argparse
 from src.data_utils import fetch_gold_data, engineer_features, preprocess_data
 from src.models import build_model, save_model_metadata, should_retrain_model, get_latest_model_path
 from src.evaluation import evaluate_model
-from src.visualization import plot_results, plot_future_trend, plot_price_trend, plot_correlation_matrix
+from src.visualization import plot_results, plot_predictions, plot_price_trend, plot_correlation_matrix
 from src.prediction import generate_predictions, generate_sample_predictions
 
 # 配置日志
@@ -120,7 +120,7 @@ def main(window=60, future_days=5, epochs=100, batch_size=32, force_retrain=Fals
             # 添加普通用户友好的趋势图表
             logger.info("生成面向普通用户的未来趋势图...")
             predictions, future_dates, df = generate_predictions(future_days)
-            plot_future_trend(predictions.flatten(), future_dates, df, future_days, use_english=True)
+            plot_predictions(predictions.flatten(), future_dates, df, future_days, use_english=True)
             
             # 保存模型使用新格式
             model.save(model_path)
@@ -171,7 +171,7 @@ def main(window=60, future_days=5, epochs=100, batch_size=32, force_retrain=Fals
             # 生成面向普通用户的未来趋势图
             logger.info("生成面向普通用户的未来趋势图...")
             predictions, future_dates, df = generate_predictions(future_days)
-            plot_future_trend(predictions.flatten(), future_dates, df, future_days, use_english=True)
+            plot_predictions(predictions.flatten(), future_dates, df, future_days, use_english=True)
             
             return model, None, metadata['metrics']
         
@@ -184,7 +184,7 @@ def generate_user_friendly_chart(future_days=5, use_english=True, use_sample_dat
     try:
         # 尝试使用模型生成预测
         predictions, future_dates, df = generate_predictions(future_days)
-        plot_future_trend(predictions.flatten(), future_dates, df, future_days, use_english=use_english)
+        plot_predictions(predictions.flatten(), future_dates, df, future_days, use_english=use_english)
     except Exception as e:
         logger.warning(f"使用模型预测失败: {str(e)}")
         if not use_sample_data:
@@ -192,7 +192,7 @@ def generate_user_friendly_chart(future_days=5, use_english=True, use_sample_dat
         
         # 使用样例数据
         predictions, future_dates, df = generate_sample_predictions(future_days)
-        plot_future_trend(predictions, future_dates, df, future_days, use_english=use_english, use_sample_data=True)
+        plot_predictions(predictions, future_dates, df, future_days, use_english=use_english, use_sample_data=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='黄金价格预测系统')
