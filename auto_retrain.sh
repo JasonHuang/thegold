@@ -37,7 +37,7 @@ log "开始执行模型重新训练检查"
 # 运行Python脚本，检查是否需要重新训练
 # --retrain-period参数可以根据实际需求调整
 log "执行Python脚本..."
-python gold.py --retrain-period 90
+python run.py --retrain-period 90
 
 # 检查执行结果
 if [ $? -eq 0 ]; then

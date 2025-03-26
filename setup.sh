@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e  # 遇到错误立即终止（网页7）
+set -e  # 遇到错误立即终止
 
 # 初始化项目目录
 PROJECT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -12,13 +12,8 @@ source $PROJECT_DIR/gold-env/bin/activate
 # 使用清华源加速安装
 export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 安装核心依赖
-pip install numpy pandas matplotlib scikit-learn
-
-# 可选深度学习框架
-read -p "是否安装TensorFlow？(y/n)" choice
-if [ $choice == "y" ]; then
-  pip install tensorflow
-fi
+# 安装所有依赖
+pip install -r requirements.txt
 
 echo "环境配置完成！激活命令：source $PROJECT_DIR/gold-env/bin/activate"
+echo "运行预测：python run.py --user-friendly"
